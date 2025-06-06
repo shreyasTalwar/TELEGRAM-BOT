@@ -1,0 +1,13 @@
+# Ignore environment variables
+.env
+
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
+
+# Ignore logs
+*.log
+
+# Ignore other unnecessary files
+*.swp
+.DS_Store

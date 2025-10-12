@@ -859,7 +859,7 @@ def main() -> None:
         
         # Optional: Use instance lock to prevent multiple instances
         try:
-            from instance_lock import InstanceLock
+            from instance_lock import InstanceLock  # type: ignore
             lock = InstanceLock()
             if not lock.acquire():
                 logger.error("❌ Another instance is already running!")

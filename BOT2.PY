@@ -5,6 +5,9 @@ import logging
 import base64
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
+from functools import lru_cache
+import aiofiles
+from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 from telegram import (
@@ -60,6 +63,11 @@ SENDING_LOCKS: Dict[int, asyncio.Lock] = {}
 
 # Global application instance for webhook mode
 application: Optional[Application] = None
+
+# Performance optimizations
+FILE_METADATA_CACHE: Dict[str, Dict] = {}  # Cache file sizes, modification times
+FOLDER_CACHE: Dict[str, List[Path]] = {}   # Cache folder listings
+CACHE_TTL = 300  # 5 minutes cache TTL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -197,10 +205,11 @@ def folder_for(action: str, subject_key: str) -> Path:
     return DATA_ROOT / action / subject_key
 
 
-def list_files(folder: Path) -> List[Path]:
-    """List all files in folder recursively, excluding hidden files."""
-    if not DATA_FOLDER_EXISTS or not folder.exists():
-        logger.info(f"Data folder not available: {folder}")
+@lru_cache(maxsize=32)
+def get_cached_folder_files(folder_path: str) -> List[Path]:
+    """Get cached list of files in folder with LRU cache."""
+    folder = Path(folder_path)
+    if not folder.exists():
         return []
 
     files = []
@@ -208,13 +217,22 @@ def list_files(folder: Path) -> List[Path]:
         for p in folder.rglob("*"):
             if p.is_file() and not p.name.startswith('.'):
                 files.append(p)
-    except PermissionError as e:
-        logger.warning(f"Permission denied accessing {folder}: {e}")
-    except Exception as e:
-        logger.error(f"Error listing files in {folder}: {e}")
+    except (PermissionError, OSError) as e:
+        logger.warning(f"Error accessing {folder}: {e}")
+        return []
 
     files.sort(key=lambda p: p.name.lower())
     return files
+
+
+def list_files(folder: Path) -> List[Path]:
+    """List all files in folder recursively with caching."""
+    if not DATA_FOLDER_EXISTS:
+        logger.info(f"Data folder not available: {folder}")
+        return []
+
+    folder_str = str(folder.resolve())
+    return get_cached_folder_files(folder_str)
 
 
 # ─── Sending Helpers ────────────────────────────────────────────────────────

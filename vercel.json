@@ -5,10 +5,6 @@
       "maxDuration": 30
     }
   },
-  "env": {
-    "TELEGRAM_TOKEN": "@telegram-token",
-    "WEBHOOK_URL": "@webhook-url"
-  },
   "buildCommand": "pip install -r requirements.txt",
   "devCommand": "python api/index.py",
   "installCommand": "pip install -r requirements.txt"

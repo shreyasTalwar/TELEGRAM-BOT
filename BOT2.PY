@@ -52,8 +52,8 @@ SUBJECTS = {
     "java": "☕ Java Programming",
 }
 
-# Simple in-memory + file-backed cache for file_ids
-CACHE_FILE = DATA_ROOT / "cache" / "file_ids.json"
+# Simple in-memory + file-backed cache for file_ids (only if data folder exists)
+CACHE_FILE = DATA_ROOT / "cache" / "file_ids.json" if DATA_FOLDER_EXISTS else None
 FILE_ID_CACHE: Dict[str, str] = {}  # key = str(path), val = file_id
 
 # Track bulk sends to support cancel in future (extendable)
@@ -73,10 +73,11 @@ logger = logging.getLogger("ece-bot")
 def load_cache() -> None:
     """Load file_id cache from disk."""
     global FILE_ID_CACHE
-    if not CACHE_FILE.exists():
+    if not DATA_FOLDER_EXISTS or not CACHE_FILE or not CACHE_FILE.exists():
+        logger.info("Cache file not available (deployment mode)")
         FILE_ID_CACHE = {}
         return
-    
+
     try:
         data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -90,6 +91,11 @@ def load_cache() -> None:
 
 
 def save_cache() -> None:
+    """Save file_id cache to disk."""
+    if not DATA_FOLDER_EXISTS or not CACHE_FILE:
+        logger.info("Cache persistence not available (deployment mode)")
+        return
+
     try:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         CACHE_FILE.write_text(json.dumps(FILE_ID_CACHE, ensure_ascii=False, indent=2), encoding="utf-8")

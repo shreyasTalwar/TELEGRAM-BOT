@@ -3,10 +3,12 @@ import sys
 from pathlib import Path
 
 # Add the parent directory to Python path so we can import BOT2
-sys.path.append(str(Path(__file__).parent.parent))
+current_dir = Path(__file__).parent
+parent_dir = current_dir.parent
+sys.path.insert(0, str(parent_dir))
 
 # Import the FastAPI app from BOT2 module
-from BOT2 import web_app
+from BOT2 import web_app  # type: ignore
 
 # Vercel serverless function entry point - this is what Vercel looks for
 app = web_app

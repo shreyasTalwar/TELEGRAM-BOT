@@ -11,3 +11,10 @@ __pycache__/
 # Ignore other unnecessary files
 *.swp
 .DS_Store
+.vercel
+
+# Ignore large data folders for deployment
+data/
+*.pdf
+*.docx
+*.pptx

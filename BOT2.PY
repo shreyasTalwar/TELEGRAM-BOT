@@ -32,7 +32,13 @@ if not TOKEN:
     raise RuntimeError("Please set TELEGRAM_TOKEN in your .env file.")
 
 # Root content layout: data/{notes|papers}/{subject_key}/<files>
-DATA_ROOT = Path(__file__).parent / "data"  # Use absolute path
+# For deployment, data folder might not exist (files are local only)
+_current_dir = Path(__file__).parent
+DATA_ROOT = _current_dir / "data"  # Use absolute path
+
+# Check if data folder exists (deployment vs local development)
+DATA_FOLDER_EXISTS = DATA_ROOT.exists()
+
 ITEMS_PER_PAGE = 10  # change per preference
 RATE_SLEEP_PER_MSG = 1.1  # Telegram recommends ~1 msg/sec per chat to avoid 429 flood
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB - Telegram bot file size limit
@@ -210,8 +216,11 @@ def folder_for(action: str, subject_key: str) -> Path:
 
 def list_files(folder: Path) -> List[Path]:
     """List all files in folder recursively, excluding hidden files."""
-    if not folder.exists():
+    # Check if data folder exists (deployment vs local)
+    if not DATA_FOLDER_EXISTS or not folder.exists():
+        logger.info(f"Data folder not available: {folder}")
         return []
+
     files = []
     try:
         # Recursively collect all files from folder and its subdirectories
@@ -223,7 +232,7 @@ def list_files(folder: Path) -> List[Path]:
         logger.warning(f"Permission denied accessing {folder}: {e}")
     except Exception as e:
         logger.error(f"Error listing files in {folder}: {e}")
-    
+
     # sort by name (case-insensitive)
     files.sort(key=lambda p: p.name.lower())
     return files

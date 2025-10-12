@@ -2,9 +2,9 @@ import os
 import json
 import asyncio
 import logging
+import base64
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-from weakref import WeakValueDictionary
 
 from dotenv import load_dotenv
 from telegram import (
@@ -18,15 +18,12 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
     ContextTypes,
-    filters,
 )
 
 # For Vercel deployment - webhook mode
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import PlainTextResponse
-import uvicorn
+from contextlib import asynccontextmanager
 
 # ─── Config & Constants ──────────────────────────────────────────────────────
 load_dotenv()
@@ -35,9 +32,9 @@ if not TOKEN:
     raise RuntimeError("Please set TELEGRAM_TOKEN in your .env file.")
 
 # Root content layout: data/{notes|papers}/{subject_key}/<files>
-DATA_ROOT = Path("data")
+DATA_ROOT = Path(__file__).parent / "data"  # Use absolute path
 ITEMS_PER_PAGE = 10  # change per preference
-RATE_SLEEP_PER_MSG = 1.1  # ~1 msg/sec per chat to avoid 429 flood in same chat
+RATE_SLEEP_PER_MSG = 1.1  # Telegram recommends ~1 msg/sec per chat to avoid 429 flood
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB - Telegram bot file size limit
 
 # Emojis for polish
@@ -45,16 +42,19 @@ SUBJECTS = {
     "arm": "🔧 ARM & Embedded",
     "acs": "📡 Advanced Comm",
     "aiml": "🤖 AI & ML",
-    "python": "🐍 Python Application ",
+    "python": "🐍 Python Application",
     "java": "☕ Java Programming",
 }
 
 # Simple in-memory + file-backed cache for file_ids
-CACHE_FILE = Path("data/cache/file_ids.json")
+CACHE_FILE = DATA_ROOT / "cache" / "file_ids.json"
 FILE_ID_CACHE: Dict[str, str] = {}  # key = str(path), val = file_id
 
 # Track bulk sends to support cancel in future (extendable)
 SENDING_LOCKS: Dict[int, asyncio.Lock] = {}  # chat_id -> lock
+
+# Global application instance for webhook mode
+application: Optional[Application] = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,13 +65,21 @@ logger = logging.getLogger("ece-bot")
 
 # ─── Utility: Cache Persistence ──────────────────────────────────────────────
 def load_cache() -> None:
+    """Load file_id cache from disk."""
     global FILE_ID_CACHE
-    if CACHE_FILE.exists():
-        try:
-            FILE_ID_CACHE = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-        except Exception:
+    if not CACHE_FILE.exists():
+        FILE_ID_CACHE = {}
+        return
+    
+    try:
+        data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            FILE_ID_CACHE = data
+        else:
+            logger.warning("Cache file has invalid format, resetting")
             FILE_ID_CACHE = {}
-    else:
+    except Exception as e:
+        logger.warning(f"Failed to load cache: {e}")
         FILE_ID_CACHE = {}
 
 
@@ -88,13 +96,48 @@ def cache_key(path: Path) -> str:
 
 
 def validate_file_path(file_path: Path, base_folder: Path) -> bool:
-    """Validate file path to prevent directory traversal attacks."""
+    """Validate file path to prevent directory traversal attacks.
+    
+    Note: Requires Python 3.9+ for is_relative_to().
+    """
     try:
         resolved_path = file_path.resolve()
         resolved_base = base_folder.resolve()
         return resolved_path.is_relative_to(resolved_base) and resolved_path.exists()
     except (ValueError, OSError):
         return False
+
+
+def generate_file_id(file_path: Path, base_folder: Path) -> str:
+    """Generate a stable, unique file identifier using base64 encoding of relative path.
+    
+    This ensures file IDs remain consistent across bot restarts.
+    """
+    try:
+        relative_path = file_path.relative_to(base_folder)
+        # Use forward slashes for consistency across platforms
+        path_str = str(relative_path).replace("\\", "/")
+        # Base64 encode to avoid special characters in callback_data
+        encoded = base64.b64encode(path_str.encode('utf-8')).decode('ascii')
+        # Truncate if too long (Telegram callback_data limit is 64 bytes)
+        return encoded[:50]
+    except (ValueError, OSError) as e:
+        logger.error(f"Failed to generate file_id for {file_path}: {e}")
+        # Fallback to filename only
+        return base64.b64encode(file_path.name.encode('utf-8')).decode('ascii')[:50]
+
+
+def decode_file_id(file_id: str, base_folder: Path) -> Optional[Path]:
+    """Decode a file_id back to its Path object."""
+    try:
+        # Decode base64
+        path_str = base64.b64decode(file_id.encode('ascii')).decode('utf-8')
+        # Reconstruct full path
+        file_path = base_folder / path_str
+        return file_path if file_path.exists() else None
+    except Exception as e:
+        logger.error(f"Failed to decode file_id {file_id}: {e}")
+        return None
 
 
 # ─── UI Builders ────────────────────────────────────────────────────────────
@@ -111,6 +154,7 @@ def files_keyboard(action: str, subject_key: str, files: List[Path], page: int) 
     start = (page - 1) * ITEMS_PER_PAGE
     end = start + ITEMS_PER_PAGE
     page_items = files[start:end]
+    base_folder = folder_for(action, subject_key)
 
     rows: List[List[InlineKeyboardButton]] = []
     for i, f in enumerate(page_items):
@@ -126,9 +170,8 @@ def files_keyboard(action: str, subject_key: str, files: List[Path], page: int) 
         else:
             label = f.name[:48] + ("…" if len(f.name) > 48 else "")
 
-        # Create a simple unique identifier for the file
-        # Use a combination of index and filename hash to avoid special characters
-        file_id = f"{i}_{hash(str(f))}"
+        # Generate stable file_id using base64 encoding
+        file_id = generate_file_id(f, base_folder)
         rows.append([InlineKeyboardButton(f"📄 {label}", callback_data=f"fil|{action}|{subject_key}|{file_id}")])
 
     # Controls row
@@ -166,21 +209,36 @@ def folder_for(action: str, subject_key: str) -> Path:
 
 
 def list_files(folder: Path) -> List[Path]:
+    """List all files in folder recursively, excluding hidden files."""
     if not folder.exists():
         return []
     files = []
-    # Recursively collect all files from folder and its subdirectories
-    for p in folder.rglob("*"):
-        if p.is_file():
-            files.append(p)
+    try:
+        # Recursively collect all files from folder and its subdirectories
+        for p in folder.rglob("*"):
+            # Skip hidden files and system files
+            if p.is_file() and not p.name.startswith('.'):
+                files.append(p)
+    except PermissionError as e:
+        logger.warning(f"Permission denied accessing {folder}: {e}")
+    except Exception as e:
+        logger.error(f"Error listing files in {folder}: {e}")
+    
     # sort by name (case-insensitive)
     files.sort(key=lambda p: p.name.lower())
     return files
 
 
 # ─── Sending Helpers ────────────────────────────────────────────────────────
-async def send_document_with_cache(chat_id: int, path: Path, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Send a document with caching. Returns True if successful, False otherwise."""
+async def send_document_with_cache(chat_id: int, path: Path, context: ContextTypes.DEFAULT_TYPE, save_cache_now: bool = True) -> bool:
+    """Send a document with caching. Returns True if successful, False otherwise.
+    
+    Args:
+        chat_id: Telegram chat ID
+        path: Path to file to send
+        context: Telegram context
+        save_cache_now: If True, save cache immediately. Set to False for bulk sends.
+    """
     # Check file size
     try:
         file_size = path.stat().st_size
@@ -205,7 +263,8 @@ async def send_document_with_cache(chat_id: int, path: Path, context: ContextTyp
             # Ensure we keep the freshest file_id if Telegram returns a new one
             if msg.document and msg.document.file_id != file_id:
                 FILE_ID_CACHE[key] = msg.document.file_id
-                save_cache()
+                if save_cache_now:
+                    save_cache()
             return True
         # Fallback: upload from disk
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
@@ -213,7 +272,8 @@ async def send_document_with_cache(chat_id: int, path: Path, context: ContextTyp
             msg = await context.bot.send_document(chat_id=chat_id, document=f, caption=path.name)
         if msg.document:
             FILE_ID_CACHE[key] = msg.document.file_id
-            save_cache()
+            if save_cache_now:
+                save_cache()
         return True
     except Exception as e:
         logger.exception(f"Failed to send {path.name}: {e}")
@@ -222,16 +282,50 @@ async def send_document_with_cache(chat_id: int, path: Path, context: ContextTyp
 
 
 async def send_all_files_rate_limited(chat_id: int, files: List[Path], context: ContextTypes.DEFAULT_TYPE):
+    """Send multiple files with rate limiting and progress updates."""
     # Ensure one bulk send per chat at a time
     lock = SENDING_LOCKS.setdefault(chat_id, asyncio.Lock())
     if lock.locked():
         await context.bot.send_message(chat_id=chat_id, text="⏳ A send is already in progress here.")
         return
+    
     async with lock:
+        total = len(files)
+        success_count = 0
+        
         for i, path in enumerate(files, start=1):
-            await send_document_with_cache(chat_id, path, context)
+            # Progress update every 5 files
+            if i % 5 == 1 and total > 5:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"📤 Sending file {i}/{total}..."
+                )
+            
+            # Don't save cache on every file (batch save at end)
+            if await send_document_with_cache(chat_id, path, context, save_cache_now=False):
+                success_count += 1
+            
             # Rate limit to ~1 msg/sec in a single chat (Telegram FAQ guidance)
             await asyncio.sleep(RATE_SLEEP_PER_MSG)
+        
+        # Save cache once at the end
+        save_cache()
+        
+        # Final summary
+        if success_count == total:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ Successfully sent all {total} files!"
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ Sent {success_count}/{total} files (some failed)"
+            )
+    
+    # Clean up lock after some time to prevent memory leak
+    await asyncio.sleep(60)
+    SENDING_LOCKS.pop(chat_id, None)
 
 
 # ─── Command Handlers ───────────────────────────────────────────────────────
@@ -290,27 +384,36 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     query_lower = query.lower()
     results: List[Tuple[str, Path]] = []
+    found_enough = False
+
     for act in ("notes", "papers"):
+        if found_enough:
+            break
         for sk in SUBJECTS.keys():
+            if found_enough:
+                break
             folder = folder_for(act, sk)
             for f in list_files(folder):
                 if query_lower in f.name.lower():
                     results.append((f"{act}/{sk}", f))
                     if len(results) >= 30:  # cap
+                        found_enough = True
                         break
     if not results:
         await update.message.reply_text(f"📭 No matches for “{query}”.")
         return
 
+    # Store results in user data for callback access
+    context.user_data['search_results'] = results
+
     # Build buttons with first page only (up to 10)
     buttons: List[List[InlineKeyboardButton]] = []
-    for where, path in results[:ITEMS_PER_PAGE]:
-        act, sk = where.split("/")
+    for i, (where, path) in enumerate(results[:ITEMS_PER_PAGE]):
         label = path.name[:48] + ("…" if len(path.name) > 48 else "")
-        buttons.append([InlineKeyboardButton(f"📄 {label}", callback_data=f"fil|{act}|{sk}|{path.name}")])
+        buttons.append([InlineKeyboardButton(f"📄 {label}", callback_data=f"search_file|{i}")])
     buttons.append([InlineKeyboardButton("🏠 Home", callback_data="home|")])
     await update.message.reply_text(
-        f"🔎 Results for “{query}”:",
+        f"🔎 Results for “{query}” (showing {min(len(results), ITEMS_PER_PAGE)} of {len(results)}):",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -329,6 +432,53 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📘 Notes", callback_data="sub|notes|_"),
              InlineKeyboardButton("📄 Papers", callback_data="sub|papers|_")],
         ]))
+        return
+
+    # Handle search result file selection
+    if parts[0] == "search_file":
+        try:
+            if not query.message:
+                logger.warning("Callback query has no message")
+                return
+            
+            if len(parts) < 2:
+                await query.edit_message_text("⚠️ Invalid search result selection.")
+                return
+            
+            idx = int(parts[1])
+            search_results = context.user_data.get('search_results', [])
+            
+            if idx >= len(search_results):
+                await query.edit_message_text("⚠️ Search result not found.")
+                return
+            
+            where, target_file = search_results[idx]
+            act, sk = where.split("/")
+            base_folder = folder_for(act, sk)
+            
+            if not target_file.exists():
+                await query.edit_message_text("⚠️ File not found.")
+                return
+            
+            # Validate path
+            if not validate_file_path(target_file, base_folder):
+                await query.edit_message_text("⚠️ Invalid file path.")
+                return
+            
+            await query.edit_message_text(f"📤 Sending: {target_file.name}")
+            await send_document_with_cache(query.message.chat.id, target_file, context)
+            
+            # Send navigation options
+            await context.bot.send_message(
+                chat_id=query.message.chat.id,
+                text="Choose another option:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 Home", callback_data="home|")]
+                ])
+            )
+        except Exception as e:
+            logger.exception(f"Error in search_file callback: {e}")
+            await query.edit_message_text("⚠️ An error occurred.")
         return
 
     # Quick search from start menu
@@ -489,34 +639,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(parts) < 4:
                 await query.edit_message_text("⚠️ Invalid file selection.")
                 return
+            
+            # Check if query.message exists
+            if not query.message:
+                logger.warning("Callback query has no message")
+                return
+            
             _, action, subject_key, file_id = parts
             base_folder = folder_for(action, subject_key)
 
-            # Get all files and find the one matching our file_id
-            all_files = list_files(base_folder)
-            start = 0  # We'll need to regenerate the keyboard to match the file_id
-            end = ITEMS_PER_PAGE
-            page_items = all_files[start:end]
-
-            # Find the file that matches our file_id
-            target_file = None
-            target_index = None
-
-            for i, f in enumerate(page_items):
-                current_file_id = f"{i}_{hash(str(f))}"
-                if current_file_id == file_id:
-                    target_file = f
-                    target_index = i
-                    break
-
-            # If not found in current page, search all files (fallback)
-            if not target_file:
-                for i, f in enumerate(all_files):
-                    current_file_id = f"{i % ITEMS_PER_PAGE}_{hash(str(f))}"
-                    if current_file_id == file_id:
-                        target_file = f
-                        target_index = i % ITEMS_PER_PAGE
-                        break
+            # Decode the file_id to get the file path
+            target_file = decode_file_id(file_id, base_folder)
 
             if not target_file or not target_file.exists():
                 await query.edit_message_text("⚠️ File not found.")
@@ -533,10 +666,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_document_with_cache(query.message.chat.id, target_file, context)
 
             # Get updated file list for the keyboard
+            files = list_files(base_folder)
             await context.bot.send_message(
                 chat_id=query.message.chat.id,
                 text="Choose another file or go back:",
-                reply_markup=files_keyboard(action, subject_key, all_files, page=1)
+                reply_markup=files_keyboard(action, subject_key, files, page=1)
             )
         except Exception as e:
             logger.exception(f"Error in file send callback: {e}")
@@ -546,6 +680,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Send all files (page or full scope)
     if parts[0] == "all":
         try:
+            # Check if query.message exists
+            if not query.message:
+                logger.warning("Callback query has no message")
+                return
+            
             if len(parts) < 5:
                 # Backward compatibility: if no mode specified, assume page mode
                 _, action, subject_key, page_str = parts
@@ -603,17 +742,61 @@ async def shutdown(app: Application) -> None:
 
 
 # ─── Webhook Setup for Vercel ──────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for FastAPI app."""
+    global application
+
+    # Startup
+    if os.getenv("VERCEL"):
+        logger.info("🚀 Initializing bot for webhook mode")
+        load_cache()
+
+        # Create application
+        application = ApplicationBuilder().token(TOKEN).build()
+
+        # Add handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_cmd))
+        application.add_handler(CommandHandler("notes", notes))
+        application.add_handler(CommandHandler("papers", papers))
+        application.add_handler(CommandHandler("search", search_cmd))
+        application.add_handler(CallbackQueryHandler(on_callback))
+
+        # Initialize application
+        await application.initialize()
+
+        # Set webhook if URL provided
+        webhook_url = os.getenv("WEBHOOK_URL")
+        if webhook_url:
+            await application.bot.set_webhook(url=webhook_url)
+            logger.info(f"Webhook set to {webhook_url}")
+
+    yield
+
+    # Shutdown
+    if application:
+        logger.info("Shutting down webhook mode, saving cache...")
+        save_cache()
+        await application.shutdown()
+
 # Create FastAPI app for Vercel deployment
-web_app = FastAPI()
+web_app = FastAPI(lifespan=lifespan)
 
 # Webhook endpoint for Telegram
 @web_app.post("/webhook")
 async def webhook(request: Request):
     """Handle webhook requests from Telegram."""
+    global application
+
+    if not application:
+        logger.error("Application not initialized")
+        return Response("Bot not initialized", status_code=503)
+
     try:
         data = await request.json()
-        update = Update.de_json(data, bot)
-        await bot.process_update(update)
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
         return Response("OK", status_code=200)
     except Exception as e:
         logger.error(f"Webhook error: {e}")
@@ -627,24 +810,30 @@ async def health_check():
 @web_app.get("/set-webhook")
 async def set_webhook_endpoint():
     """Endpoint to set webhook URL."""
+    global application
+
+    if not application:
+        return {"error": "Application not initialized"}
+
     webhook_url = os.getenv("WEBHOOK_URL")
     if not webhook_url:
         return {"error": "WEBHOOK_URL not set"}
 
     try:
-        await bot.set_webhook(url=webhook_url)
+        await application.bot.set_webhook(url=webhook_url)
         return {"status": "Webhook set successfully", "url": webhook_url}
     except Exception as e:
         return {"error": str(e)}
 
 # ─── Main ───────────────────────────────────────────────────────────────────
 def main() -> None:
-    global bot
+    """Main function for local polling mode."""
+    global application
+    
     load_cache()
 
     # Create bot instance
     application = ApplicationBuilder().token(TOKEN).build()
-    bot = application.bot
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
@@ -654,17 +843,35 @@ def main() -> None:
     application.add_handler(CommandHandler("search", search_cmd))
     application.add_handler(CallbackQueryHandler(on_callback))
 
-    # Register shutdown handler
-    application.post_shutdown = shutdown
+    # Register shutdown handler properly
+    if hasattr(application, 'post_shutdown') and application.post_shutdown is not None:
+        application.post_shutdown.append(shutdown)
+    else:
+        logger.warning("post_shutdown not available, skipping shutdown handler registration")
 
     # Check if running on Vercel (webhook mode) or locally (polling mode)
     if os.getenv("VERCEL"):
         logger.info("🚀 Running in webhook mode for Vercel")
-        # In webhook mode, we don't call run_polling()
+        # In webhook mode, initialization happens in startup event
         # The bot will process updates via the /webhook endpoint
     else:
         logger.info("🔄 Running in polling mode for local development")
-        application.run_polling()
+        
+        # Optional: Use instance lock to prevent multiple instances
+        try:
+            from instance_lock import InstanceLock
+            lock = InstanceLock()
+            if not lock.acquire():
+                logger.error("❌ Another instance is already running!")
+                return
+            
+            try:
+                application.run_polling()
+            finally:
+                lock.release()
+        except ImportError:
+            logger.warning("instance_lock module not found, running without lock")
+            application.run_polling()
 
 # Vercel serverless function entry point
 async def app_handler(scope, receive, send):
@@ -672,4 +879,7 @@ async def app_handler(scope, receive, send):
     await web_app(scope, receive, send)
 
 if __name__ == "__main__":
-    main()
+    if not os.getenv("VERCEL"):
+        main()
+    else:
+        logger.info("Running in Vercel mode, use ASGI handler")

@@ -11,10 +11,7 @@
   ],
   "functions": {
     "api/index.py": {
-      "includeFiles": [
-        "BOT2.PY",
-        "telegram bot ece/data/**"
-      ]
+      "includeFiles": "**"
     }
   },
   "routes": [

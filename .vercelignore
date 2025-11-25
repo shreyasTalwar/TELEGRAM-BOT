@@ -1,0 +1,21 @@
+# Ignore large data folders (keep them local)
+telegram bot ece/data/
+data/
+
+# Ignore large file types
+*.pdf
+*.docx
+*.pptx
+*.zip
+*.rar
+
+# Ignore cache and logs
+__pycache__/
+*.py[cod]
+*.log
+output.txt
+output2.txt
+
+# Ignore documentation
+Documentation/
+*.md

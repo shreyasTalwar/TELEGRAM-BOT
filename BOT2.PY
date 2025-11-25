@@ -799,7 +799,17 @@ async def shutdown(app: Application) -> None:
 # ─── Initialize Bot Application ─────────────────────────────────────────────
 def init_application(use_polling: bool = False) -> Application:
     """Initialize and configure the bot application."""
-    builder = ApplicationBuilder().token(TOKEN)
+    from telegram.request import HTTPXRequest
+    
+    # Configure request with longer timeouts for large file uploads
+    request = HTTPXRequest(
+        connection_pool_size=8,
+        connect_timeout=10.0,
+        read_timeout=60.0,  # 60 seconds for large file uploads
+        write_timeout=60.0,
+    )
+    
+    builder = ApplicationBuilder().token(TOKEN).request(request)
     
     # For polling mode, we need to explicitly configure the updater
     # The default builder for polling includes an updater automatically

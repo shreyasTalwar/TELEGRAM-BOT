@@ -1,10 +1,4 @@
 {
-  "functions": {
-    "api/index.py": {
-      "maxDuration": 10,
-      "includeFiles": "**"
-    }
-  },
   "rewrites": [
     {
       "source": "/(.*)",

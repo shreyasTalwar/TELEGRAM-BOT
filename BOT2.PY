@@ -3,11 +3,12 @@ import json
 import asyncio
 import logging
 import base64
+import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-from functools import lru_cache
+from functools import lru_cache, wraps
+from collections import defaultdict
 import aiofiles
-from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 from telegram import (
@@ -36,7 +37,7 @@ if not TOKEN:
 
 # Root content layout: data/{notes|papers}/{subject_key}/<files>
 _current_dir = Path(__file__).parent
-DATA_ROOT = _current_dir / "data"
+DATA_ROOT = _current_dir / "telegram bot ece" / "data"
 
 # Check if data folder exists (deployment vs local development)
 DATA_FOLDER_EXISTS = DATA_ROOT.exists()
@@ -57,9 +58,14 @@ SUBJECTS = {
 # Simple in-memory + file-backed cache for file_ids
 CACHE_FILE = DATA_ROOT / "cache" / "file_ids.json" if DATA_FOLDER_EXISTS else None
 FILE_ID_CACHE: Dict[str, str] = {}
+CACHE_LOCK = asyncio.Lock()  # Global cache lock for async operations
 
 # Track bulk sends
 SENDING_LOCKS: Dict[int, asyncio.Lock] = {}
+
+# Rate limiting per user
+USER_RATE_LIMITS = defaultdict(list)  # {user_id: [timestamps]}
+MAX_REQUESTS_PER_MINUTE = 30
 
 # Global application instance for webhook mode
 application: Optional[Application] = None
@@ -97,17 +103,31 @@ def load_cache() -> None:
         FILE_ID_CACHE = {}
 
 
-def save_cache() -> None:
-    """Save file_id cache to disk."""
+async def save_cache_async() -> None:
+    """Save file_id cache to disk asynchronously."""
     if not DATA_FOLDER_EXISTS or not CACHE_FILE:
-        logger.info("Cache persistence not available (deployment mode)")
+        return
+
+    async with CACHE_LOCK:
+        try:
+            CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            cache_data = json.dumps(FILE_ID_CACHE, ensure_ascii=False, indent=2)
+            async with aiofiles.open(CACHE_FILE, 'w', encoding='utf-8') as f:
+                await f.write(cache_data)
+        except Exception as e:
+            logger.error(f"Failed to persist file_id cache: {e}")
+
+
+def save_cache() -> None:
+    """Synchronous wrapper for cache saving (for shutdown handlers)."""
+    if not DATA_FOLDER_EXISTS or not CACHE_FILE:
         return
 
     try:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         CACHE_FILE.write_text(json.dumps(FILE_ID_CACHE, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
-        logger.warning(f"Failed to persist file_id cache: {e}")
+        logger.error(f"Failed to persist file_id cache: {e}")
 
 
 def cache_key(path: Path) -> str:
@@ -205,13 +225,24 @@ def folder_for(action: str, subject_key: str) -> Path:
     return DATA_ROOT / action / subject_key
 
 
-@lru_cache(maxsize=32)
+# Cache with TTL for folder listings
+FOLDER_CACHE_DATA: Dict[str, Tuple[float, List[Path]]] = {}
+
 def get_cached_folder_files(folder_path: str) -> List[Path]:
-    """Get cached list of files in folder with LRU cache."""
+    """Get cached list of files in folder with TTL-based cache."""
     folder = Path(folder_path)
     if not folder.exists():
         return []
 
+    now = time.time()
+    
+    # Check if cache is still valid
+    if folder_path in FOLDER_CACHE_DATA:
+        timestamp, cached_files = FOLDER_CACHE_DATA[folder_path]
+        if now - timestamp < CACHE_TTL:
+            return cached_files
+
+    # Refresh cache
     files = []
     try:
         for p in folder.rglob("*"):
@@ -222,6 +253,7 @@ def get_cached_folder_files(folder_path: str) -> List[Path]:
         return []
 
     files.sort(key=lambda p: p.name.lower())
+    FOLDER_CACHE_DATA[folder_path] = (now, files)
     return files
 
 
@@ -233,6 +265,25 @@ def list_files(folder: Path) -> List[Path]:
 
     folder_str = str(folder.resolve())
     return get_cached_folder_files(folder_str)
+
+
+# ─── Rate Limiting ─────────────────────────────────────────────────────────
+async def check_rate_limit(user_id: int) -> bool:
+    """Check if user is within rate limits."""
+    now = time.time()
+    minute_ago = now - 60
+    
+    # Clean old timestamps
+    USER_RATE_LIMITS[user_id] = [
+        ts for ts in USER_RATE_LIMITS[user_id] 
+        if ts > minute_ago
+    ]
+    
+    if len(USER_RATE_LIMITS[user_id]) >= MAX_REQUESTS_PER_MINUTE:
+        return False
+    
+    USER_RATE_LIMITS[user_id].append(now)
+    return True
 
 
 # ─── Sending Helpers ────────────────────────────────────────────────────────
@@ -260,7 +311,7 @@ async def send_document_with_cache(chat_id: int, path: Path, context: ContextTyp
             if msg.document and msg.document.file_id != file_id:
                 FILE_ID_CACHE[key] = msg.document.file_id
                 if save_cache_now:
-                    save_cache()
+                    await save_cache_async()
             return True
         
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
@@ -269,12 +320,18 @@ async def send_document_with_cache(chat_id: int, path: Path, context: ContextTyp
         if msg.document:
             FILE_ID_CACHE[key] = msg.document.file_id
             if save_cache_now:
-                save_cache()
+                await save_cache_async()
         return True
     except Exception as e:
         logger.exception(f"Failed to send {path.name}: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"⚠️ Failed: {path.name}")
         return False
+
+
+async def cleanup_sending_lock(chat_id: int, delay: int = 60):
+    """Clean up sending lock after delay."""
+    await asyncio.sleep(delay)
+    SENDING_LOCKS.pop(chat_id, None)
 
 
 async def send_all_files_rate_limited(chat_id: int, files: List[Path], context: ContextTypes.DEFAULT_TYPE):
@@ -284,41 +341,46 @@ async def send_all_files_rate_limited(chat_id: int, files: List[Path], context: 
         await context.bot.send_message(chat_id=chat_id, text="⏳ A send is already in progress here.")
         return
     
-    async with lock:
-        total = len(files)
-        success_count = 0
-        
-        for i, path in enumerate(files, start=1):
-            if i % 5 == 1 and total > 5:
+    try:
+        async with lock:
+            total = len(files)
+            success_count = 0
+            
+            for i, path in enumerate(files, start=1):
+                if i % 5 == 1 and total > 5:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"📤 Sending file {i}/{total}..."
+                    )
+                
+                if await send_document_with_cache(chat_id, path, context, save_cache_now=False):
+                    success_count += 1
+                
+                await asyncio.sleep(RATE_SLEEP_PER_MSG)
+            
+            await save_cache_async()
+            
+            if success_count == total:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"📤 Sending file {i}/{total}..."
+                    text=f"✅ Successfully sent all {total} files!"
                 )
-            
-            if await send_document_with_cache(chat_id, path, context, save_cache_now=False):
-                success_count += 1
-            
-            await asyncio.sleep(RATE_SLEEP_PER_MSG)
-        
-        save_cache()
-        
-        if success_count == total:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"✅ Successfully sent all {total} files!"
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"✅ Sent {success_count}/{total} files (some failed)"
-            )
-    
-    await asyncio.sleep(60)
-    SENDING_LOCKS.pop(chat_id, None)
+            else:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"✅ Sent {success_count}/{total} files (some failed)"
+                )
+    finally:
+        # Schedule lock cleanup
+        asyncio.create_task(cleanup_sending_lock(chat_id))
 
 
 # ─── Command Handlers ───────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_rate_limit(update.effective_user.id):
+        await update.message.reply_text("⚠️ Too many requests. Please wait a moment.")
+        return
+    
     welcome_message = """
 🎓 *Welcome to ECE 6th Semester Bot!* 🎓
 
@@ -353,6 +415,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_rate_limit(update.effective_user.id):
+        await update.message.reply_text("⚠️ Too many requests. Please wait a moment.")
+        return
+    
     await update.message.reply_text(
         "📘 Select a subject for notes:",
         reply_markup=subject_keyboard("notes")
@@ -360,6 +426,10 @@ async def notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def papers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_rate_limit(update.effective_user.id):
+        await update.message.reply_text("⚠️ Too many requests. Please wait a moment.")
+        return
+    
     await update.message.reply_text(
         "📄 Select a subject for previous year question papers:",
         reply_markup=subject_keyboard("papers")
@@ -367,6 +437,10 @@ async def papers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_rate_limit(update.effective_user.id):
+        await update.message.reply_text("⚠️ Too many requests. Please wait a moment.")
+        return
+    
     query = " ".join(context.args) if context.args else ""
     if not query:
         await update.message.reply_text("🔎 Usage: /search <text>")
@@ -408,6 +482,11 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Callback Handler ───────────────────────────────────────────────────────
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    
+    if not query:
+        logger.warning("Callback query is None")
+        return
+    
     await query.answer()
 
     data = query.data or ""
@@ -718,9 +797,13 @@ async def shutdown(app: Application) -> None:
 
 
 # ─── Initialize Bot Application ─────────────────────────────────────────────
-def init_application() -> Application:
+def init_application(use_polling: bool = False) -> Application:
     """Initialize and configure the bot application."""
-    app = ApplicationBuilder().token(TOKEN).build()
+    builder = ApplicationBuilder().token(TOKEN)
+    
+    # For polling mode, we need to explicitly configure the updater
+    # The default builder for polling includes an updater automatically
+    app = builder.build()
     
     # Add handlers
     app.add_handler(CommandHandler("start", start))
@@ -752,7 +835,9 @@ async def lifespan(app: FastAPI):
     webhook_url = os.getenv("WEBHOOK_URL")
     if webhook_url:
         await application.bot.set_webhook(url=webhook_url)
-        logger.info(f"✅ Webhook set to {webhook_url}")
+        # Redact query parameters from log
+        safe_url = webhook_url.split('?')[0]
+        logger.info(f"✅ Webhook set to {safe_url}")
     else:
         logger.warning("⚠️ WEBHOOK_URL not set")
 
@@ -820,32 +905,22 @@ def main() -> None:
     
     load_cache()
     
-    # Create and configure application
-    application = init_application()
-    
-    # Register shutdown handler
-    if hasattr(application, 'post_shutdown') and application.post_shutdown is not None:
-        application.post_shutdown.append(shutdown)
-    else:
-        logger.warning("post_shutdown not available, skipping shutdown handler registration")
+    # Create and configure application for polling mode
+    application = init_application(use_polling=True)
     
     logger.info("🔄 Running in polling mode for local development")
+    logger.info("Press Ctrl+C to stop the bot")
     
-    # Optional: Use instance lock to prevent multiple instances
-    try:
-        from instance_lock import InstanceLock  # type: ignore
-        lock = InstanceLock()
-        if not lock.acquire():
-            logger.error("❌ Another instance is already running!")
-            return
-        
-        try:
-            application.run_polling()
-        finally:
-            lock.release()
-    except ImportError:
-        logger.warning("instance_lock module not found, running without lock")
-        application.run_polling()
+    # Run the bot with polling
+    # The ApplicationBuilder automatically includes an Updater when using run_polling()
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+    )
+    
+    # Save cache on exit
+    logger.info("Bot stopped, saving cache...")
+    save_cache()
 
 
 if __name__ == "__main__":

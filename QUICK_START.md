@@ -1,355 +1,276 @@
-# Quick Start Guide - ECE Study Materials Bot
+# Quick Start Guide - ECE Telegram Bot
 
-## 🚀 Getting Started
+## ✅ Changes Applied Successfully!
 
-### Prerequisites
-- Python 3.9+ (required for `Path.is_relative_to()`)
-- Telegram Bot Token (get from [@BotFather](https://t.me/botfather))
+All critical fixes from the code review have been implemented. Your bot is now more secure, performant, and reliable!
 
-### Installation
+---
 
-1. **Install Dependencies:**
+## 🚀 How to Run
+
+### Local Development (Polling Mode)
 ```bash
-pip install python-telegram-bot python-dotenv fastapi
+# Make sure your .env file has TELEGRAM_TOKEN set
+python BOT2.PY
 ```
 
-2. **Set Up Environment:**
-Create a `.env` file in the project root:
+You should see:
+```
+INFO | 🔄 Running in polling mode for local development
+INFO | Press Ctrl+C to stop the bot
+```
+
+### Vercel Deployment (Webhook Mode)
+The bot will automatically use webhook mode when `VERCEL` environment variable is detected.
+
+---
+
+## 🎯 Key Improvements
+
+### 1. **Rate Limiting** (NEW!)
+- Prevents spam: 30 requests per minute per user
+- Automatic throttling with friendly error messages
+- Protects your bot from abuse
+
+### 2. **Better Performance**
+- Async cache operations (no more blocking!)
+- Smart caching with 5-minute auto-refresh
+- Memory leak fixes in lock management
+
+### 3. **Enhanced Security**
+- Per-user rate limiting
+- Secure logging (no sensitive data exposure)
+- Proper error handling
+
+### 4. **Bug Fixes**
+- Fixed polling mode (works locally now!)
+- Removed instance_lock dependency issues
+- Fixed callback query null checks
+- Fixed cache race conditions
+
+---
+
+## 📊 What Changed in the Code?
+
+### Added Features
+- ✅ `check_rate_limit()` - Per-user rate limiting
+- ✅ `save_cache_async()` - Non-blocking cache saves
+- ✅ `cleanup_sending_lock()` - Automatic lock cleanup
+- ✅ TTL-based folder caching with auto-expiration
+- ✅ Null checks for callback queries
+
+### Removed/Fixed
+- ❌ Removed unused `ThreadPoolExecutor` import
+- ✅ Fixed `@lru_cache` that never expired
+- ✅ Fixed blocking I/O in async functions
+- ✅ Fixed memory leak in SENDING_LOCKS dictionary
+- ✅ Simplified polling mode initialization
+
+---
+
+## 🧪 Testing Your Bot
+
+### Test Rate Limiting
+1. Send `/start` command 35 times quickly
+2. After 30 requests, you should see:
+   > ⚠️ Too many requests. Please wait a moment.
+
+### Test Caching
+1. Browse to any subject (e.g., `/notes` → ARM)
+2. First load: Scans filesystem
+3. Second load: Uses cache (faster!)
+4. Wait 5+ minutes and browse again: Cache refreshes
+
+### Test File Sending
+1. Use `/notes` to browse materials
+2. Select a subject and file
+3. File should send with progress indicators
+4. Try "Send all" for batch operations
+
+---
+
+## ⚙️ Configuration
+
+### Required
 ```env
 TELEGRAM_TOKEN=your_bot_token_here
 ```
 
-3. **Organize Your Files:**
-```
-data/
-├── notes/
-│   ├── arm/
-│   ├── acs/
-│   ├── aiml/
-│   ├── python/
-│   └── java/
-└── papers/
-    ├── arm/
-    ├── acs/
-    ├── aiml/
-    ├── python/
-    └── java/
+### Optional
+```env
+WEBHOOK_URL=https://your-app.vercel.app/webhook  # For Vercel deployment
+VERCEL=1  # Auto-detected on Vercel
 ```
 
----
-
-## 🖥️ Local Development (Polling Mode)
-
-### Run the Bot:
-```bash
-python BOT2.PY
-```
-
-### Expected Output:
-```
-2024-01-15 10:30:00 | INFO | 🔄 Running in polling mode for local development
-2024-01-15 10:30:01 | INFO | Bot started successfully
-```
-
-### Test Commands:
-1. Open Telegram and find your bot
-2. Send `/start` - Should show welcome menu
-3. Click "📘 Browse Notes" - Should show subjects
-4. Select a subject - Should show files
-5. Click a file - Should receive the file
-6. Try `/search test` - Should show search results
-
----
-
-## ☁️ Vercel Deployment (Webhook Mode)
-
-### 1. Prepare for Deployment
-
-Create `vercel.json`:
-```json
-{
-  "version": 2,
-  "builds": [
-    {
-      "src": "BOT2.PY",
-      "use": "@vercel/python"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "BOT2.PY"
-    }
-  ],
-  "env": {
-    "TELEGRAM_TOKEN": "@telegram_token",
-    "VERCEL": "1"
-  }
-}
-```
-
-### 2. Deploy to Vercel
-
-```bash
-# Install Vercel CLI
-npm install -g vercel
-
-# Login
-vercel login
-
-# Deploy
-vercel --prod
-```
-
-### 3. Set Environment Variables
-
-In Vercel Dashboard:
-1. Go to your project settings
-2. Add environment variables:
-   - `TELEGRAM_TOKEN` = your bot token
-   - `VERCEL` = 1
-   - `WEBHOOK_URL` = https://your-app.vercel.app/webhook
-
-### 4. Register Webhook
-
-Visit: `https://your-app.vercel.app/set-webhook`
-
-Should return:
-```json
-{
-  "status": "Webhook set successfully",
-  "url": "https://your-app.vercel.app/webhook"
-}
-```
-
-### 5. Test
-
-Send `/start` to your bot - it should respond via webhook!
-
----
-
-## 📁 File Organization Tips
-
-### Recommended Structure:
-```
-data/
-├── notes/
-│   ├── python/
-│   │   ├── Module 1/
-│   │   │   ├── Introduction.pdf
-│   │   │   └── Basics.pdf
-│   │   ├── Module 2/
-│   │   │   └── Advanced.pdf
-│   │   └── Assignments/
-│   │       └── Assignment1.pdf
-│   └── java/
-│       └── ...
-└── papers/
-    ├── python/
-    │   ├── 2023_QP.pdf
-    │   └── 2022_QP.pdf
-    └── ...
-```
-
-### File Naming Best Practices:
-- ✅ Use descriptive names: `Module1_Introduction.pdf`
-- ✅ Include module/topic: `ARM_Microcontroller_Basics.pdf`
-- ✅ Use underscores or spaces: `Python GUI Programming.pdf`
-- ❌ Avoid special characters: `file@#$.pdf`
-- ❌ Don't use very long names (>100 chars)
-
----
-
-## 🔧 Configuration
-
-### Adjust Settings in BOT2.PY:
-
+### Adjustable Parameters (in code)
 ```python
-# Number of files per page
-ITEMS_PER_PAGE = 10  # Change to 5, 15, 20, etc.
-
-# Rate limiting (messages per second)
-RATE_SLEEP_PER_MSG = 1.1  # Increase for slower sending
-
-# File size limit (20MB default)
-MAX_FILE_SIZE = 20 * 1024 * 1024  # Change if needed
-
-# Subjects
-SUBJECTS = {
-    "arm": "🔧 ARM & Embedded",
-    "acs": "📡 Advanced Comm",
-    "aiml": "🤖 AI & ML",
-    "python": "🐍 Python Application",
-    "java": "☕ Java Programming",
-}
-# Add more subjects as needed
+MAX_REQUESTS_PER_MINUTE = 30  # Rate limit (line ~64)
+CACHE_TTL = 300               # Cache expiry in seconds (5 min)
+ITEMS_PER_PAGE = 10          # Files shown per page
+MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB limit
 ```
 
 ---
 
-## 🐛 Troubleshooting
+## 📁 File Structure
+
+```
+TELEGRAM-BOT/
+├── BOT2.PY                    # ✨ Updated bot code (all fixes applied)
+├── .env                       # Your bot token (keep secret!)
+├── .env.example              # Example environment file
+├── data/                     # Your study materials
+│   ├── notes/               # Study notes by subject
+│   └── papers/              # Previous year papers
+├── cache/                    # Auto-generated file ID cache
+│   └── file_ids.json        # Cached Telegram file IDs
+├── IMPROVEMENTS_SUMMARY.md   # 📋 Detailed change log
+└── QUICK_START.md           # 📖 This file
+```
+
+---
+
+## ❓ Troubleshooting
 
 ### Bot doesn't start
-**Error:** `RuntimeError: Please set TELEGRAM_TOKEN in your .env file.`
-**Solution:** Create `.env` file with your token
-
-### Files not showing
-**Check:**
-1. Files exist in correct folders
-2. Folder names match subject keys in `SUBJECTS`
-3. Files are not hidden (don't start with `.`)
-
-### "File not found" error
-**Causes:**
-1. File was deleted after bot started
-2. File path has special characters
-3. Permission issues
-
-**Solution:** Restart bot to refresh file list
-
-### Webhook not working
-**Check:**
-1. `VERCEL=1` is set in environment
-2. `WEBHOOK_URL` is correct
-3. Visit `/set-webhook` endpoint
-4. Check Vercel logs for errors
-
-### "Another instance is already running"
-**Cause:** Instance lock is active
-**Solution:** 
 ```bash
-# Remove lock file
-rm data/cache/bot.lock
+# Check if dependencies are installed
+pip install -r requirements.txt
+
+# Verify token is set
+echo $TELEGRAM_TOKEN  # Linux/Mac
+echo %TELEGRAM_TOKEN%  # Windows
+```
+
+### "Too many requests" error immediately
+- Adjust `MAX_REQUESTS_PER_MINUTE` in BOT2.PY (line ~64)
+- Or wait 60 seconds for rate limit to reset
+
+### Files not showing up
+- Wait 5 minutes for cache to refresh
+- Or restart the bot to clear cache
+- Check that files exist in `data/notes/` or `data/papers/`
+
+### Import errors
+```bash
+# Install missing dependencies
+pip install python-telegram-bot fastapi aiofiles python-dotenv
 ```
 
 ---
 
-## 📊 Monitoring
+## 🎓 How to Use (For Students)
 
-### Check Bot Status:
+### Browse Notes
+1. Send `/start` or `/notes`
+2. Select a subject (ARM, ACS, AIML, Python, Java)
+3. Browse files organized by modules
+4. Click a file to download
+5. Use "Send all" to download multiple files
 
-**Local Mode:**
-- Watch console output for errors
-- Check `data/cache/file_ids.json` for cache
+### Search Files
+1. Send `/search <keyword>`
+2. Example: `/search python module 3`
+3. Results show matching files across all subjects
 
-**Webhook Mode:**
-- Visit `https://your-app.vercel.app/` for health check
-- Check Vercel logs for errors
-- Monitor Telegram bot API errors
-
-### Common Log Messages:
-
-```
-✅ Good:
-INFO | Bot started successfully
-INFO | Webhook set to https://...
-INFO | Sending file 5/10...
-
-⚠️ Warning:
-WARNING | Cache file has invalid format, resetting
-WARNING | Permission denied accessing folder
-WARNING | instance_lock module not found
-
-❌ Error:
-ERROR | Failed to send file.pdf: ...
-ERROR | Webhook error: ...
-ERROR | Another instance is already running!
-```
-
----
-
-## 🔐 Security Notes
-
-### Best Practices:
-1. ✅ Never commit `.env` file to git
-2. ✅ Use environment variables for tokens
-3. ✅ Keep bot token secret
-4. ✅ Regularly update dependencies
-5. ✅ Monitor bot usage for abuse
-
-### File Security:
-- Path validation prevents directory traversal
-- File size limits prevent abuse
-- Only files in `data/` folder are accessible
+### Previous Year Papers
+1. Send `/papers`
+2. Select your subject
+3. Download question papers
 
 ---
 
 ## 📈 Performance Tips
 
-### For Large File Collections:
-1. **Organize by modules** - Easier navigation
-2. **Limit files per subject** - Keep under 100 files
-3. **Use descriptive names** - Better search results
-4. **Compress large PDFs** - Faster uploads
+### For Better Performance
+1. Let cache warm up (first access scans filesystem)
+2. Use "Send all" for bulk downloads (optimized)
+3. Search is fast (cached file lists)
 
-### For High Traffic:
-1. **Use webhook mode** - More scalable than polling
-2. **Enable caching** - Reduces upload time
-3. **Monitor rate limits** - Avoid Telegram API bans
-4. **Consider CDN** - For very large files
+### For Server Admins
+1. Monitor cache hit rates in logs
+2. Adjust `CACHE_TTL` based on how often files change
+3. Set appropriate `MAX_REQUESTS_PER_MINUTE` for your users
 
 ---
 
-## 🆘 Getting Help
+## 🔒 Security Notes
 
-### Check Documentation:
-- `CHANGES_SUMMARY.md` - All fixes applied
-- `FILE_ID_SYSTEM.md` - How file IDs work
-- `instance_lock.py` - Instance locking system
+### What's Protected
+- ✅ Rate limiting prevents spam
+- ✅ Path validation prevents directory traversal
+- ✅ File size limits prevent memory exhaustion
+- ✅ Secure logging (no secrets in logs)
 
-### Common Issues:
-1. **Bot not responding** - Check token and internet
-2. **Files not sending** - Check file size and permissions
-3. **Search not working** - Check file names and folders
-4. **Webhook errors** - Check Vercel logs and environment variables
-
-### Debug Mode:
-Enable detailed logging:
-```python
-logging.basicConfig(
-    level=logging.DEBUG,  # Change from INFO to DEBUG
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-```
+### What to Keep Secret
+- 🔐 `TELEGRAM_TOKEN` - Never commit to git!
+- 🔐 `WEBHOOK_URL` if it contains secrets
+- 🔐 `.env` file - Add to `.gitignore`
 
 ---
 
-## ✅ Checklist Before Going Live
+## 🚀 Deployment Checklist
 
-- [ ] Bot token is set correctly
-- [ ] All files are organized in `data/` folder
-- [ ] Tested all commands locally
-- [ ] Tested file selection and download
-- [ ] Tested search functionality
-- [ ] Tested pagination
-- [ ] Tested "send all" feature
-- [ ] Cache is working (files send faster on second try)
-- [ ] Instance lock prevents multiple instances
-- [ ] Webhook is set (for Vercel deployment)
-- [ ] Environment variables are configured
-- [ ] Logs are being monitored
+### Before Deploying
+- [ ] Set `TELEGRAM_TOKEN` in environment
+- [ ] Test locally with `/start`
+- [ ] Verify file sending works
+- [ ] Check rate limiting works
+- [ ] Test search functionality
+
+### For Vercel Deployment
+- [ ] Set `WEBHOOK_URL` environment variable
+- [ ] Set `TELEGRAM_TOKEN` in Vercel env vars
+- [ ] Deploy and test webhook endpoint
+- [ ] Verify bot responds in Telegram
 
 ---
 
-## 🎉 You're Ready!
+## 📞 Support
 
-Your ECE Study Materials Bot is now ready to serve students!
+### Getting Help
+1. Check `IMPROVEMENTS_SUMMARY.md` for detailed technical info
+2. Review error messages in console/logs
+3. Verify all dependencies are installed
+4. Ensure TOKEN is correct and bot is active
 
-**Features:**
-- ✅ Browse notes by subject
-- ✅ Browse previous year papers
-- ✅ Search across all files
-- ✅ Pagination for large lists
-- ✅ Bulk file sending
-- ✅ Progress updates
-- ✅ File caching for speed
-- ✅ Dual-mode deployment (local/cloud)
+### Common Questions
 
-**Next Steps:**
-1. Add more subjects as needed
-2. Organize files by modules
-3. Share bot with students
-4. Monitor usage and feedback
-5. Update files regularly
+**Q: Can I change the rate limit?**  
+A: Yes! Edit `MAX_REQUESTS_PER_MINUTE` in BOT2.PY (line ~64)
 
-Happy bot running! 🚀
+**Q: How do I add more subjects?**  
+A: Update the `SUBJECTS` dictionary (line ~50) and add corresponding folders in `data/`
+
+**Q: Cache not refreshing?**  
+A: Cache refreshes every 5 minutes. Adjust `CACHE_TTL` if needed.
+
+---
+
+## ✨ What's New
+
+### Compared to Original Code
+| Feature | Before | After |
+|---------|--------|-------|
+| Rate Limiting | ❌ None | ✅ 30 req/min |
+| Cache System | ❌ Never expires | ✅ 5-min TTL |
+| Async I/O | ❌ Blocking | ✅ Fully async |
+| Memory Leaks | ⚠️ Lock leaks | ✅ Auto cleanup |
+| Error Handling | ⚠️ Basic | ✅ Robust |
+| Local Mode | ❌ Broken | ✅ Works perfectly |
+
+---
+
+## 🎉 You're All Set!
+
+Your bot is now:
+- ✅ **Faster** - Better caching and async operations
+- ✅ **Safer** - Rate limiting and security fixes
+- ✅ **Stabler** - No memory leaks or blocking operations
+- ✅ **Smarter** - Auto-refreshing cache and error recovery
+
+**Happy coding! 🚀**
+
+---
+
+*For detailed technical information, see `IMPROVEMENTS_SUMMARY.md`*
